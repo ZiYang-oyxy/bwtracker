@@ -27,11 +27,14 @@
 #define DEF_WAN "pppoe-wan"
 #define DEF_LAN "br-lan"
 #define DUMPPACKETS
+#define BW_AGING
+#define AGING_TIME 4 /* 4*8s = 32s */
 
 static LIST_HEAD(bw_list);
 static char wan_if[16];
 static char lan_if[16];
 static int dbg = 0;
+static spinlock_t bw_lock;
 
 struct bw {
 	struct list_head bw_link;
@@ -42,6 +45,9 @@ struct bw {
 	u32 down_byte;
 	u32 old_up_bw; /* kB/s */
 	u32 old_down_bw;
+#ifdef BW_AGING
+	int aging;
+#endif
 };
 
 static struct proc_dir_entry *bwt_dir;
@@ -98,6 +104,9 @@ static struct bw* create_bw_entry(__be32 addr)
 	bw->down_byte = 0;
 	bw->old_up_bw = 0;
 	bw->old_down_bw = 0;
+#ifdef BW_AGING
+	bw->aging = 0;
+#endif
 	list_add_tail(&bw->bw_link, &bw_list);
 	pr_info("[bwtracker] Add a new entry. IP: %pI4", &bw->addr);
 
@@ -108,14 +117,27 @@ static void bw_timer_fn(unsigned long data)
 {
 	struct bw *bw;
 
+	spin_lock(&bw_lock);
 	list_for_each_entry(bw, &bw_list, bw_link) {
-		bw->old_up_bw = bw->up_byte >> 12;
-		bw->old_down_bw = bw->down_byte >> 12;
+#ifdef BW_AGING
+		if (bw->up_byte == 0) {
+			if (++(bw->aging) >= AGING_TIME) {
+				//TODO add a lock will be better
+				list_del(&bw->bw_link);
+				//free(bw);
+			}
+			continue;
+		}
+		bw->aging = 0;
+#endif
+		bw->old_up_bw = bw->up_byte >> 13; /* kB in 8s */
+		bw->old_down_bw = bw->down_byte >> 13;
 		bw->up_byte = 0;
 		bw->down_byte = 0;
-		pr_info("[bwtracker] %pI4: up:%d kB/s down:%d kB/s",
-				&bw->addr, bw->old_up_bw, bw->old_down_bw);
+		//pr_info("[bwtracker] %pI4: up:%d kB/s down:%d kB/s",
+		//		&bw->addr, bw->old_up_bw, bw->old_down_bw);
 	}
+	spin_unlock(&bw_lock);
 	mod_timer(&bw_timer, jiffies + 4 * HZ);
 }
 static unsigned int bandwidth_tracker(unsigned int hooknum,
@@ -149,6 +171,7 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 	//	dbg++;
 	//}
 
+	spin_lock(&bw_lock);
 	/* downstream first */
 	if (!strcmp((out ? out->name : ""), lan_if) &&
 			!strcmp((in ? in->name : ""), wan_if)) {
@@ -178,6 +201,7 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 		bw->up_byte += skb->data_len;
 		//pr_info("U src:%pI4 dst:%pI4", &ih->saddr, &ih->daddr);
 	}
+	spin_unlock(&bw_lock);
 
 out:
 	return NF_ACCEPT;
