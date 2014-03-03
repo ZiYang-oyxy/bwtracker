@@ -22,13 +22,12 @@
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 
-//#define DEF_WAN "wlan0"
-//#define DEF_LAN "br-lan"
 #define DEF_WAN "pppoe-wan"
 #define DEF_LAN "br-lan"
 #define DUMPPACKETS
 #define BW_AGING
-#define AGING_TIME 4 /* 4*8s = 32s */
+#define INTERVAL 3
+#define AGING_TIME (4 * (1 << INTERVAL))
 
 static LIST_HEAD(bw_list);
 static char wan_if[16];
@@ -108,37 +107,34 @@ static struct bw* create_bw_entry(__be32 addr)
 	bw->aging = 0;
 #endif
 	list_add_tail(&bw->bw_link, &bw_list);
-	pr_info("[bwtracker] Add a new entry. IP: %pI4", &bw->addr);
+	//pr_info("[bwtracker] Add a new entry. IP: %pI4", &bw->addr);
 
 	return bw;
 }
 
 static void bw_timer_fn(unsigned long data)
 {
-	struct bw *bw;
+	struct bw *bw, *bwtmp;
 
 	spin_lock(&bw_lock);
-	list_for_each_entry(bw, &bw_list, bw_link) {
+	list_for_each_entry_safe(bw, bwtmp, &bw_list, bw_link) {
 #ifdef BW_AGING
 		if (bw->up_byte == 0) {
 			if (++(bw->aging) >= AGING_TIME) {
-				//TODO add a lock will be better
 				list_del(&bw->bw_link);
-				//free(bw);
+				kfree(bw);
 			}
 			continue;
 		}
 		bw->aging = 0;
 #endif
-		bw->old_up_bw = bw->up_byte >> 13; /* kB in 8s */
-		bw->old_down_bw = bw->down_byte >> 13;
+		bw->old_up_bw = bw->up_byte >> (10 + INTERVAL); /* kB/s */
+		bw->old_down_bw = bw->down_byte >> (10 + INTERVAL);
 		bw->up_byte = 0;
 		bw->down_byte = 0;
-		//pr_info("[bwtracker] %pI4: up:%d kB/s down:%d kB/s",
-		//		&bw->addr, bw->old_up_bw, bw->old_down_bw);
 	}
 	spin_unlock(&bw_lock);
-	mod_timer(&bw_timer, jiffies + 4 * HZ);
+	mod_timer(&bw_timer, jiffies + (1 << INTERVAL) * HZ);
 }
 static unsigned int bandwidth_tracker(unsigned int hooknum,
 						struct sk_buff *skb,
@@ -150,26 +146,13 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 	const struct iphdr *ih;
 	struct bw *bw;
 
-	//if (dbg < 2) {
-	//	dump_data(skb->data, skb->data_len);
-	//	dbg++;
-	//}
-
 	//if (skb->protocol != htons(ETH_P_IP))
 	//	goto out;
 
-	/* TODO how to find the pointer, ip_hdr didn't take effect */
 	ih = skb_header_pointer(skb, 0, sizeof(_iph), &_iph);
-	//ih = skb_header_pointer(skb, iphoff, sizeof(_iph), &_iph);
 	if (ih == NULL) { /* truncated */
 		goto out;
 	}
-
-	//if (dbg < 5) {
-	//	pr_info("src:%pI4 dst:%pI4 in:%s out:%s", &ih->saddr, &ih->daddr,
-	//			(in ? in->name : ""), (out ? out->name : ""));
-	//	dbg++;
-	//}
 
 	spin_lock(&bw_lock);
 	/* downstream first */
@@ -182,13 +165,8 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 		}
 
 		bw->down_pkts++;
-		/* TODO skb->len == null? */
+		/* TODO skb->len == null? Add length of ethernet and pppoe header. */
 		bw->down_byte += skb->data_len;
-		//if (dbg < 20) {
-		//	pr_info("D src:%pI4 dst:%pI4 dlen:%d, l:%d", &ih->saddr, &ih->daddr,
-		//			skb->data_len, skb->len);
-		//	dbg++;
-		//}
 	} else if (!strcmp((out ? out->name : ""), wan_if) &&
 			!strcmp((in ? in->name : ""), lan_if)) {
 		bw = find_bw_entry(ih->saddr);
@@ -199,7 +177,6 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 
 		bw->up_pkts++;
 		bw->up_byte += skb->data_len;
-		//pr_info("U src:%pI4 dst:%pI4", &ih->saddr, &ih->daddr);
 	}
 	spin_unlock(&bw_lock);
 
@@ -207,13 +184,15 @@ out:
 	return NF_ACCEPT;
 }
 
+/* The uplink bandwidth may be inaccurate when you set up a output qdisc,
+ * because qdisc is executed in dev_queue_xmit which is after netfilter
+ * hook point */
 static struct nf_hook_ops bwt_nf_ops[] __read_mostly = {
 	{
 		.hook = bandwidth_tracker,
 		.owner = THIS_MODULE,
 		.pf = NFPROTO_IPV4,
 		.hooknum = NF_INET_FORWARD,
-		//.hooknum = NF_INET_POST_ROUTING,
 		.priority = NF_IP_PRI_FIRST + 1,
 	}
 };
@@ -225,7 +204,8 @@ static int bwt_read_proc_bw(char *page, char **start, off_t off,
 
 	*eof = 1;
 	list_for_each_entry(bw, &bw_list, bw_link) {
-		ret += sprintf(page + ret, "%pI4/%d/%d\n", &bw->addr,  bw->old_down_bw, bw->old_up_bw);
+		ret += sprintf(page + ret, "%pI4/%d/%d\n", &bw->addr,
+				bw->old_down_bw, bw->old_up_bw);
 	}
 
 	return ret;
