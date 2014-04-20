@@ -1,0 +1,29 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+DB_PATH=/usr/share/mac2vendor
+
+cd "$DB_PATH"
+
+[ -z "$1" ] && exit 1
+
+if [ -e "$1" ]; then
+	:
+else
+	LINK=http://www.macvendorlookup.com/api/v2
+	wget "$LINK/"$1"" || exit 1
+fi
+
+DATA=`cat "$1"`
+# jshn only parses "{...}", but we are "[{...}]", ignore "[" and "]"
+DATA=${DATA:1:`expr ${#DATA} - 2`} 2> /dev/null
+
+COMPANY="UNKNOWN"
+
+json_init
+json_load "$DATA"
+json_get_var COMPANY company
+
+cat <<EOF
+$COMPANY
+EOF

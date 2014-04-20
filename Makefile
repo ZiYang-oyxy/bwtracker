@@ -42,4 +42,9 @@ define Build/Compile
 	modules
 endef
 
+define Package/bwtracker/install
+	$(INSTALL_DIR) $(1)
+	$(CP) ./files/* $(1)/
+endef
+
 $(eval $(call KernelPackage,bwtracker))

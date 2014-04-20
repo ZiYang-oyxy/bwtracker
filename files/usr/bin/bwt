@@ -1,0 +1,23 @@
+#!/bin/sh
+
+BWT_CACHE=`cat /proc/net/bwt/bw`
+ARP_CACHE=`cat /proc/net/arp`
+LEASES_CACHE=`cat /tmp/dhcp.leases`
+
+echo "$BWT_CACHE" | while read LINE; do
+	IP=`echo "$LINE" | cut -d '/' -f 1`
+
+	MAC_LINE=`echo "$ARP_CACHE" | grep $IP`
+	#format MAC_LINE with whitespace delimiter
+	MAC=`echo $MAC_LINE | cut -d ' ' -f 4`
+
+	ID=`echo "$LEASES_CACHE" | grep $IP | cut -d ' ' -f 4`
+	ID=${ID:-UNKNOWN}
+
+	VENDOR=`mac2vendor $MAC`
+	VENDOR=${VENDOR:-$MAC}
+
+	LINE="$LINE///$ID///$VENDOR"
+	echo "$LINE"
+done
+
