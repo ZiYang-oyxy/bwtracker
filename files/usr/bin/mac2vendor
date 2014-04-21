@@ -11,7 +11,7 @@ if [ -e "$1" ]; then
 	:
 else
 	LINK=http://www.macvendorlookup.com/api/v2
-	wget "$LINK/"$1"" || exit 1
+	wget "$LINK/"$1"" &> /dev/null || exit 1
 fi
 
 DATA=`cat "$1"`
