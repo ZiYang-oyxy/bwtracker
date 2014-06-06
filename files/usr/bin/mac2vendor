@@ -15,15 +15,19 @@ else
 fi
 
 DATA=`cat "$1"`
-# jshn only parses "{...}", but we are "[{...}]", ignore "[" and "]"
-DATA=${DATA:1:`expr ${#DATA} - 2`} 2> /dev/null
+if [ "${DATA:0:1}" = "[" ]; then
+	# jshn only parses "{...}", but we are "[{...}]", ignore "[" and "]"
+	DATA=${DATA:1:`expr ${#DATA} - 2`} 2> /dev/null
 
-COMPANY="UNKNOWN"
+	COMPANY="UNKNOWN"
 
-json_init
-json_load "$DATA"
-json_get_var COMPANY company
+	json_init
+	json_load "$DATA"
+	json_get_var COMPANY company
 
 cat <<EOF
 $COMPANY
 EOF
+else
+	echo "$DATA"
+fi

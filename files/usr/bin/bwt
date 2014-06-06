@@ -3,9 +3,18 @@
 BWT_CACHE=`cat /proc/net/bwt/bw`
 ARP_CACHE=`cat /proc/net/arp`
 LEASES_CACHE=`cat /tmp/dhcp.leases`
+CONNTRACK_CACHE=`lua /usr/bin/conn.lua`
 
-echo "$BWT_CACHE" | while read LINE; do
+DOWN_TOTAL=0
+UP_TOTAL=0
+CONN_TOTAL=0
+
+printf "%-15.15s | %-5.5s | %-5.5s | %-14.14s | %-20.20s | %-4s | %-6s | %s\n" \
+	"IP" "DOWN" "UP" "ID" "VENDOR" "CONN" "PKTS" "UPLOAD"
+while read LINE; do
 	IP=`echo "$LINE" | cut -d '/' -f 1`
+	DOWN=`echo "$LINE" | cut -d '/' -f 2`
+	UP=`echo "$LINE" | cut -d '/' -f 3`
 
 	MAC_LINE=`echo "$ARP_CACHE" | grep $IP`
 	#format MAC_LINE with whitespace delimiter
@@ -17,7 +26,25 @@ echo "$BWT_CACHE" | while read LINE; do
 	VENDOR=`mac2vendor $MAC`
 	VENDOR=${VENDOR:-$MAC}
 
-	LINE="$LINE///$ID///$VENDOR"
-	echo "$LINE"
-done
+	CONN=`echo "$CONNTRACK_CACHE" | grep $IP | cut -d ' ' -f 2`
+	PKTS=`echo "$CONNTRACK_CACHE" | grep $IP | cut -d ' ' -f 3`
+	BYTES=`echo "$CONNTRACK_CACHE" | grep $IP | cut -d ' ' -f 4`
+	if [ "$BYTES" -gt 1024 ]; then
+		BYTES=$(( $BYTES / 1024 ))"KB"
+	else
+		BYTES=$BYTES"B"
+	fi
+
+	CONN_TOTAL=$(( CONN_TOTAL + CONN ))
+	UP_TOTAL=$(( UP_TOTAL + UP ))
+	DOWN_TOTAL=$(( DOWN_TOTAL + DOWN ))
+	printf "%-15.15s | %-5.5s | %-5.5s | %-14.14s | %-20.20s | %-4s | %-6s | %s\n" \
+		"$IP" "$DOWN" "$UP" "$ID" "$VENDOR" "$CONN" "$PKTS" "$BYTES"
+#done < <( echo "$BWT_CACHE" ) # ash didn't support it
+done <<EOF
+`echo "$BWT_CACHE"`
+EOF
+
+printf "%-15.15s | %-5.5s | %-5.5s | %-14.14s | %-20.20s | %-4s | %-6s | %s\n" \
+	"total" "$DOWN_TOTAL" "$UP_TOTAL" "" "" "$CONN_TOTAL"
 
