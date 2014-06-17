@@ -42,8 +42,8 @@ define Build/Compile
 	modules
 endef
 
-define Package/bwtracker/install
-	$(INSTALL_DIR) $(1)
+define KernelPackage/bwtracker/install
+	$(INSTALL_DIR) $(1)/usr/bin
 	$(CP) ./files/* $(1)/
 endef
 
