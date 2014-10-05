@@ -14,6 +14,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/proc_fs.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/ip.h>
@@ -25,14 +26,14 @@
 #define DEF_WAN "pppoe-wan"
 #define DEF_LAN "br-lan"
 #define DUMPPACKETS
+
+#define INTERVAL_FACTOR 3  /* 3 means 8s */
 #define BW_AGING
-#define INTERVAL 3
-#define AGING_TIME (4 * (1 << INTERVAL))
+#define AGING_TIME 300  /* the same with the default aging time of fdb */
 
 static LIST_HEAD(bw_list);
 static char wan_if[16];
 static char lan_if[16];
-static int dbg = 0;
 static spinlock_t bw_lock;
 
 struct bw {
@@ -45,11 +46,11 @@ struct bw {
 	u32 old_up_bw; /* kB/s */
 	u32 old_down_bw;
 #ifdef BW_AGING
-	int aging;
+	int idle;  /* judge who is offline via the idle time */
 #endif
 };
 
-static struct proc_dir_entry *bwt_dir;
+static struct proc_dir_entry *bwt_file;
 static struct timer_list bw_timer;
 
 #ifdef DUMPPACKETS
@@ -72,10 +73,10 @@ void dump_data(unsigned char *Data, int length)
 	}
 	printk(KERN_INFO "%s\n", s);
 	printk(KERN_INFO "------------------\n");
-}				// dump_data
+}
 #else
 #define dump_data(data,len)
-#endif				// DUMPPACKETS
+#endif
 
 static struct bw* find_bw_entry(__be32 addr)
 {
@@ -104,10 +105,10 @@ static struct bw* create_bw_entry(__be32 addr)
 	bw->old_up_bw = 0;
 	bw->old_down_bw = 0;
 #ifdef BW_AGING
-	bw->aging = 0;
+	bw->idle = 0;
 #endif
 	list_add_tail(&bw->bw_link, &bw_list);
-	//pr_info("[bwtracker] Add a new entry. IP: %pI4", &bw->addr);
+	//pr_info("[bwtracker] Add a new entry. IP: %pI4\n", &bw->addr);
 
 	return bw;
 }
@@ -115,26 +116,30 @@ static struct bw* create_bw_entry(__be32 addr)
 static void bw_timer_fn(unsigned long data)
 {
 	struct bw *bw, *bwtmp;
+	int idle_time;
 
 	spin_lock(&bw_lock);
 	list_for_each_entry_safe(bw, bwtmp, &bw_list, bw_link) {
 #ifdef BW_AGING
 		if (bw->up_byte == 0) {
-			if (++(bw->aging) >= AGING_TIME) {
+			bw->idle++;
+			idle_time = bw->idle * (1 << INTERVAL_FACTOR);
+			if (idle_time >= AGING_TIME) {
 				list_del(&bw->bw_link);
 				kfree(bw);
+				continue;
 			}
-			continue;
+		} else {
+			bw->idle = 0;
 		}
-		bw->aging = 0;
 #endif
-		bw->old_up_bw = bw->up_byte >> (10 + INTERVAL); /* kB/s */
-		bw->old_down_bw = bw->down_byte >> (10 + INTERVAL);
+		bw->old_up_bw = bw->up_byte >> (10 + INTERVAL_FACTOR); /* kB/s */
+		bw->old_down_bw = bw->down_byte >> (10 + INTERVAL_FACTOR);
 		bw->up_byte = 0;
 		bw->down_byte = 0;
 	}
 	spin_unlock(&bw_lock);
-	mod_timer(&bw_timer, jiffies + (1 << INTERVAL) * HZ);
+	mod_timer(&bw_timer, jiffies + (1 << INTERVAL_FACTOR) * HZ);
 }
 static unsigned int bandwidth_tracker(unsigned int hooknum,
 						struct sk_buff *skb,
@@ -165,8 +170,8 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 		}
 
 		bw->down_pkts++;
-		/* TODO skb->len == null? Add length of ethernet and pppoe header. */
-		bw->down_byte += skb->data_len;
+		/* FIXME Add length of ethernet and pppoe header. */
+		bw->down_byte += skb->len;
 	} else if (!strcmp((out ? out->name : ""), wan_if) &&
 			!strcmp((in ? in->name : ""), lan_if)) {
 		bw = find_bw_entry(ih->saddr);
@@ -176,7 +181,7 @@ static unsigned int bandwidth_tracker(unsigned int hooknum,
 		}
 
 		bw->up_pkts++;
-		bw->up_byte += skb->data_len;
+		bw->up_byte += skb->len;
 	}
 	spin_unlock(&bw_lock);
 
@@ -197,32 +202,36 @@ static struct nf_hook_ops bwt_nf_ops[] __read_mostly = {
 	}
 };
 
-static int bwt_read_proc_bw(char *page, char **start, off_t off,
-					  int count, int *eof, void *data) {
+static int bwt_proc_show(struct seq_file *m, void *v)
+{
 	struct bw *bw;
-	int ret = 0;
 
-	*eof = 1;
 	list_for_each_entry(bw, &bw_list, bw_link) {
-		ret += sprintf(page + ret, "%pI4/%d/%d\n", &bw->addr,
+		seq_printf(m, "%pI4/%u/%u\n", &bw->addr,
 				bw->old_down_bw, bw->old_up_bw);
 	}
 
-	return ret;
+	return 0;
 }
 
-static int bwt_proc_init()
+static int bwt_proc_open(struct inode *inode, struct file *file)
 {
-	bwt_dir = proc_mkdir("bwt", init_net.proc_net);
-	if (!bwt_dir) {
-		pr_err("Failed to mkdir /proc/net/bwt\n");
-		return -ENOMEM;
-	}
+	return single_open(file, bwt_proc_show, NULL);
+}
 
-	/* read only proc entries */
-	if (create_proc_read_entry("bw", 0, bwt_dir,
-				bwt_read_proc_bw, NULL) == NULL) {
-		pr_err("Unable to create /proc/bwt/bw entry");
+static const struct file_operations bwt_proc_ops = {
+	.owner		= THIS_MODULE,
+	.open		= bwt_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int bwt_proc_init(void)
+{
+	bwt_file = proc_create("bwt", 0, NULL, &bwt_proc_ops);
+	if (!bwt_file) {
+		remove_proc_entry("bwt", NULL);
 		return -ENOMEM;
 	}
 
@@ -233,12 +242,13 @@ static int __init bwt_init(void)
 {
 	int rc = -ENOMEM;
 
-	if (rc = bwt_proc_init())
-		goto fail;
+	rc = bwt_proc_init();
+	if (rc)
+		goto out;
 
 	sprintf(lan_if, "%s", DEF_LAN);
 	sprintf(wan_if, "%s", DEF_WAN);
-	pr_info("[bwtracker] lan:%s wan:%s", lan_if, wan_if);
+	pr_info("[bwtracker] lan:%s wan:%s\n", lan_if, wan_if);
 
 	rc = nf_register_hooks(bwt_nf_ops, ARRAY_SIZE(bwt_nf_ops));
 
@@ -246,17 +256,13 @@ static int __init bwt_init(void)
 	bw_timer.expires = jiffies + 4 * HZ;
 	add_timer(&bw_timer);
 
-	return rc;
-fail:
-	remove_proc_entry("bw", bwt_dir);
-	remove_proc_entry("bwt", init_net.proc_net);
+out:
 	return rc;
 }
 
 static void __exit bwt_exit(void)
 {
-	remove_proc_entry("bw", bwt_dir);
-	remove_proc_entry("bwt", init_net.proc_net);
+	remove_proc_entry("bwt", NULL);
 
 	del_timer(&bw_timer);
 	nf_unregister_hooks(bwt_nf_ops, ARRAY_SIZE(bwt_nf_ops));

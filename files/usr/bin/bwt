@@ -1,6 +1,6 @@
 #!/bin/sh
 
-BWT_CACHE=`cat /proc/net/bwt/bw`
+BWT_CACHE=`cat /proc/bwt`
 ARP_CACHE=`cat /proc/net/arp`
 LEASES_CACHE=`cat /tmp/dhcp.leases`
 CONNTRACK_CACHE=`lua /usr/bin/conn.lua`
